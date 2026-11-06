@@ -6,25 +6,13 @@ from ollama import chat
 
 load_dotenv()
 
+QUESTIONS = [
+    ("Сколько голов забил Lionel Messi в сезоне 2010/2011?", "31"),
+    ("Сколько всего голов забил Lionel Messi?", "138"),
+    ("Сколько домашних матчей сыграла Barcelona в сезоне 2009/2010?", "16"),
+]
 
-def run_sql(query: str) -> str:
-    """
-    Выполни SQL запрос к БД PostgreSQL
-
-    Args:
-        query: запрос на языке PostgreSQL
-    """
-    with pg.connect(os.environ["DATABASE_URL"]) as conn:
-        conn.read_only = True
-        with conn.cursor() as cursor:
-            cursor.execute(query)
-            return str(cursor.fetchall())
-
-
-if __name__ == "__main__":
-    prompt = "Сколько голов забил Lionel Messi в сезоне 2010/2011?"
-
-    tables = """
+tables = """
         competitions (competition_id, competition_name, country_name);
         seasons (season_id, season_name);
         teams (team_id, team_name);
@@ -33,92 +21,61 @@ if __name__ == "__main__":
         goals (goal_id, match_id, player_id, team_id, period, minute, second, goal_type, body_part, is_own_goal); 
     """
 
-    tables_two = """
-     table competitions (
-        competition_id integer primary key,
-        competition_name text not null,
-        country_name text not null
-    );
-    
-     table seasons (
-        season_id integer primary key,
-        season_name text not null
-    );
-    
-     table teams (
-        team_id integer primary key,
-        team_name text not null
-    );
-    
-     table players (
-        player_id integer primary key,
-        player_name text not null,
-        player_nickname text,
-        country_name text
-    );
-    
-     table matches (
-        match_id integer primary key,
-        competition_id integer not null references competitions,
-        season_id integer not null references seasons,
-        match_date date not null,
-        kick_off time,
-        match_week smallint,
-        competition_stage text,
-        home_team_id integer not null references teams,
-        away_team_id integer not null references teams,
-        home_score smallint not null,
-        away_score smallint not null,
-        stadium_name text,
-        referee_name text
-    );
-    
-     table goals (
-        goal_id uuid primary key,
-        match_id integer not null references matches,
-        player_id integer not null references players,
-        team_id integer not null references teams,
-        period smallint not null,
-        minute smallint not null,
-        second smallint not null,
-        goal_type text not null,
-        body_part text,
-        is_own_goal boolean not null default false
-    );
-    
-     index on goals (player_id);
-     index on goals (match_id);
-     index on matches (season_id);
-     index on matches (home_team_id);
-     index on matches (away_team_id);
+rules = {
+    "role": "system",
+    "content": (
+        "Сразу вызывай run_sql, не описывай шаги и не задавай вопросов. "
+        "Игрока ищи по players.player_nickname, сезон по seasons.season_name. "
+        "Связи: goals.player_id = players.player_id; "
+        "goals.match_id = matches.match_id; "
+        "matches.season_id = seasons.season_id. "
+        "В goals нет season_id, сезон определяй через JOIN с matches и seasons. "
+        "Голы игрока считай через count(*), условие: is_own_goal = false.\n"
+        f"Таблицы:\n{tables}"
+    )
+}
+
+options = {
+    "temperature": 0
+}
+
+
+def run_sql(query: str) -> str:
     """
+    Выполни SQL запрос к БД PostgreSQL
 
-    rules = {
-        "role": "system",
-        "content": (
-            "Сразу вызывай run_sql, не описывай шаги и не задавай вопросов. "
-            "Игрока ищи по players.player_nickname, сезон по seasons.season_name. "
-            "Связи: goals.player_id = players.player_id; "
-            "goals.match_id = matches.match_id; "
-            "matches.season_id = seasons.season_id. "
-            "В goals нет season_id, сезон определяй через JOIN с matches и seasons. "
-            "Голы игрока считай через count(*), условие: is_own_goal = false.\n"
-            f"Таблицы:\n{tables}"
-        )
-    }
+    Args:
+        query: запрос на языке PostgreSQL
+    """
+    try:
+        with pg.connect(os.environ["DATABASE_URL"]) as conn:
+            conn.read_only = True
+            with conn.cursor() as cursor:
+                cursor.execute(query)
+                return str(cursor.fetchall())
+    except pg.Error as e:
+        print(e)
 
-    messages = [
-        rules,
-        {"role": "user", "content": prompt}
-    ]
 
-    options = {
-        "temperature": 0
-    }
+if __name__ == "__main__":
+    model = os.environ["MODEL"]
+    print("Model: ", model)
 
-    response = chat(model=os.environ["MODEL"], messages=messages, tools=[run_sql], options=options)
-    data = response.model_dump_json()
+    for q, expected in QUESTIONS:
+        print("Question: ", q)
+        messages = [
+            rules,
+            {"role": "user", "content": q}
+        ]
 
-    print(data)
-    print(response.message.content)
-    print(response.message.tool_calls)
+        response = chat(model=model, messages=messages, tools=[run_sql], think=False, options=options)
+        sql = response.message.tool_calls[0].function.arguments["query"]
+        result = run_sql(sql)
+        print("SQL:", sql)
+        print("Результат:", result)
+
+        messages.append(response.message)
+        messages.append({"role": "tool", "tool_name": "run_sql", "content": result})
+
+        response_two = chat(model=model, messages=messages, think=False, options=options)
+        print("Ответ:", response_two.message.content)
